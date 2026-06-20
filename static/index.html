@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!--
+  tv_charts frontend shell.
+  Loads Lightweight Charts v4.2.x (pinned), the dark theme, and app.js which
+  opens /ws and renders the chart grid. The browser is a pure renderer; the
+  server owns all state and pushes scene/candles/indicator/drawing messages.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>tv_charts</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="/config.js"></script>
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">tv_charts</div>
+    <label class="ctl">Asset
+      <select id="assetSelect"></select>
+    </label>
+    <label class="ctl">Layout
+      <select id="layoutSelect"></select>
+    </label>
+    <button id="refreshBtn" class="ctl-btn" title="Reload all charts">Refresh</button>
+    <div class="spacer"></div>
+    <button id="logToggle" class="ctl-btn" title="Toggle AI event log">Log</button>
+    <div id="connDot" class="conn-dot" title="WS status">●</div>
+  </header>
+
+  <main id="grid" class="grid layout-4"></main>
+
+  <aside id="eventLog" class="event-log hidden">
+    <div class="event-log-head">
+      <span>AI / event log</span>
+      <button id="logClear" class="ctl-btn small">clear</button>
+    </div>
+    <ul id="eventLogList"></ul>
+  </aside>
+
+  <!-- Lightweight Charts v4.2.x is loaded dynamically by app.js from the
+       CDN url in window.TVC_CONFIG, then app.js boots the grid. -->
+  <script src="/static/app.js"></script>
+</body>
+</html>

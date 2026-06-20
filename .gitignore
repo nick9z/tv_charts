@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Ephemeral per-session candle cache (wiped every launch)
+*.db
+tv_charts.db
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
