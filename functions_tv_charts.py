@@ -743,11 +743,12 @@ async def add_sma(timeframe: str, period: int) -> dict:
 def _default_lookback_ts(symbol: str, timeframe: str) -> int:
     """Default VWAP-anchor / VP-start time when none is given.
 
-    Returns DEFAULT_LOOKBACK_DAYS before the latest loaded bar for
-    (symbol, timeframe), falling back to wall-clock now minus the lookback if
-    no bars are cached yet. UNIX seconds.
+    Looks back a timeframe-aware number of days (DEFAULT_LOOKBACK_DAYS map)
+    before the latest loaded bar for (symbol, timeframe), falling back to
+    wall-clock now minus the lookback if no bars are cached yet. UNIX seconds.
     """
-    lookback = C.DEFAULT_LOOKBACK_DAYS * 86400
+    days = C.DEFAULT_LOOKBACK_DAYS.get(timeframe, C.DEFAULT_LOOKBACK_DAYS_FALLBACK)
+    lookback = days * 86400
     o = read_ohlcv(symbol, timeframe)
     if len(o["time"]):
         return int(o["time"][-1]) - lookback

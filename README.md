@@ -69,10 +69,11 @@ The small dot in the top-right corner is the connection indicator: **green = liv
 Click an indicator toggle on a panel:
 - **EMA / SMA** — prompts for a period (default 50 / 200). Click again with the same
   period to remove it. Multiple periods can coexist (each gets its own color).
-- **VWAP** — anchored VWAP; by default anchored **14 days back** from the latest bar
-  (configurable via `DEFAULT_LOOKBACK_DAYS`). Toggle off to remove.
-- **VP** — Volume Profile over the **last 14 days** by default, drawing the value-area
-  bars on the right plus **POC / VAH / VAL** price lines.
+- **VWAP** — anchored VWAP; by default anchored a **timeframe-aware lookback** back from
+  the latest bar (14d on 15m/1H/4H, 90d on D, 365d on W, 1095d on M — see
+  `DEFAULT_LOOKBACK_DAYS`), so every timeframe gets a healthy window. Toggle off to remove.
+- **VP** — Volume Profile over that same timeframe-aware default window, drawing the
+  value-area bars on the right plus **POC / VAH / VAL** price lines.
 - **Vol** — a volume histogram in a strip along the bottom, green/red by candle.
 
 ## 1.6 Driving it with an AI (the main event)

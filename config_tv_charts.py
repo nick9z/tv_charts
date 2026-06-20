@@ -48,8 +48,19 @@ VP_BINS = 50                                          # volume-profile buckets
 VP_VALUE_AREA = 0.70                                  # 70% value area band
 # Default lookback for VWAP anchor / Volume Profile range when the AI or user
 # does not specify one: start this many days before the latest loaded bar.
-# NOTE: on high timeframes 14 days is only a handful of bars (W ~2, M <1).
-DEFAULT_LOOKBACK_DAYS = 14
+# Timeframe-aware so every timeframe gets a healthy bar count (a flat 14 days
+# would leave W ~2 bars and M <1 bar). Keyed by UI timeframe label; the
+# approx bar count each window yields is noted alongside.
+DEFAULT_LOOKBACK_DAYS = {
+    "15m": 14,     # ~1344 bars
+    "1H":  14,     # ~336 bars
+    "4H":  14,     # ~84 bars
+    "D":   90,     # ~90 bars
+    "W":   365,    # ~52 bars
+    "M":   1095,   # ~36 bars (3 years)
+}
+# Used if a timeframe is somehow missing from the map above.
+DEFAULT_LOOKBACK_DAYS_FALLBACK = 14
 
 # ---- Storage -----------------------------------------------------------
 DB_PATH = "tv_charts.db"                              # wiped on every launch
