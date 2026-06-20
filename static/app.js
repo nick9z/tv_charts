@@ -282,6 +282,8 @@
         color: b.close >= b.open ? UP : DOWN,
       });
     }
+    // Keep the VP bars aligned as the price axis auto-scales / its width shifts.
+    if (p.vpData) drawVP(p);
     updatePrice(p, b.close);
   }
 
@@ -403,30 +405,42 @@
   // Volume Profile overlay (right-aligned horizontal bars + level lines)
   // =========================================================
   function sizeVP(p) {
+    // Canvas spans the whole chart host; bars are right-aligned to the plot
+    // area (left of the price axis) in drawVP so they never cover the labels.
     const r = p.host.getBoundingClientRect();
-    const w = Math.max(80, Math.round(r.width * 0.18));
-    p.vpCanvas.width = w * window.devicePixelRatio;
-    p.vpCanvas.height = r.height * window.devicePixelRatio;
-    p.vpCanvas.style.width = w + "px";
+    const dpr = window.devicePixelRatio || 1;
+    p.vpCanvas.width = Math.round(r.width * dpr);
+    p.vpCanvas.height = Math.round(r.height * dpr);
+    p.vpCanvas.style.width = r.width + "px";
     p.vpCanvas.style.height = r.height + "px";
   }
 
   function drawVP(p) {
+    const dpr = window.devicePixelRatio || 1;
     const ctx = p.vpCanvas.getContext("2d");
-    ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
-    const W = p.vpCanvas.width / window.devicePixelRatio;
-    const H = p.vpCanvas.height / window.devicePixelRatio;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const W = p.vpCanvas.width / dpr;
+    const H = p.vpCanvas.height / dpr;
     ctx.clearRect(0, 0, W, H);
     if (!p.vpData || !p.vpData.buckets.length) return;
+    // Right edge of the plotting area = canvas width minus the price-axis width,
+    // so bars stop just left of the price labels instead of covering them.
+    let axisW = 60;
+    try {
+      const w = p.chart.priceScale("right").width();
+      if (w && w > 0) axisW = w;
+    } catch (e) { /* older API -> use fallback width */ }
+    const plotRight = Math.max(20, W - axisW - 2);
+    const maxBar = Math.min(plotRight - 4, Math.max(40, plotRight * 0.2));
     const maxV = Math.max(...p.vpData.buckets.map((b) => b.volume)) || 1;
     const barColor = (p.vpData.colors && p.vpData.colors.bar) || "#5b6b8c";
     ctx.fillStyle = barColor + "80"; // ~50% opacity
+    const h = Math.max(1, H / p.vpData.buckets.length - 1);
     p.vpData.buckets.forEach((b) => {
       const y = p.candleSeries.priceToCoordinate(b.price);
       if (y === null) return;
-      const bw = (b.volume / maxV) * (W - 4);
-      const h = Math.max(1, H / p.vpData.buckets.length - 1);
-      ctx.fillRect(W - bw, y - h / 2, bw, h);
+      const bw = (b.volume / maxV) * maxBar;
+      ctx.fillRect(plotRight - bw, y - h / 2, bw, h);
     });
   }
 
