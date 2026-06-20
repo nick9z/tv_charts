@@ -25,7 +25,23 @@ drift out of sync.
 
 ## 1.2 Starting it
 
-On the Beelink (Ubuntu, always-on):
+On the Beelink (Ubuntu, always-on) the easiest way is the launcher script:
+
+```bash
+~/ai_projects/tv_charts/tv_charts.sh
+```
+
+On a desktop this **starts the server, opens the chart page in your browser, and opens
+a terminal running Claude Code already linked to the MCP server** (it registers/uses the
+`tv_charts` MCP server; the first `claude` launch asks you to approve the project's
+`.mcp.json` once, then auto-connects). Move the windows wherever you like. Press
+**Ctrl-C** in the launcher to stop everything.
+
+- `tv_charts.sh --no-open` (or `TVC_NO_OPEN=1 tv_charts.sh`) just starts the server.
+- With no display (e.g. over SSH) the window-opening is skipped automatically.
+- If the server is already running, it just opens the windows.
+
+Or start the server by hand:
 
 ```bash
 cd ~/ai_projects/tv_charts
