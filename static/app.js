@@ -22,9 +22,23 @@
   // remembered periods).
   const DEFAULT_PERIODS = { ema: 9, sma: 21 };
   // Remembers the period(s) shown when EMA/SMA is toggled off, keyed
-  // `${timeframe}:${kind}`, so toggling back on restores them for the rest of
-  // the page session (including any periods the AI set).
-  const indMemory = new Map();
+  // `${timeframe}:${kind}`, so toggling back on restores them. Persisted to
+  // localStorage so the memory survives page reloads / browser restarts.
+  const IND_MEMORY_KEY = "tvcharts.indMemory";
+  const indMemory = loadIndMemory();
+
+  function loadIndMemory() {
+    try {
+      const raw = localStorage.getItem(IND_MEMORY_KEY);
+      if (raw) return new Map(Object.entries(JSON.parse(raw)));
+    } catch (e) { /* storage unavailable / corrupt -> start empty */ }
+    return new Map();
+  }
+  function saveIndMemory() {
+    try {
+      localStorage.setItem(IND_MEMORY_KEY, JSON.stringify(Object.fromEntries(indMemory)));
+    } catch (e) { /* storage unavailable -> in-memory only this session */ }
+  }
 
   // ---- dynamic load of Lightweight Charts, then boot ----
   function loadLWC() {
@@ -206,11 +220,14 @@
       if (current.length) {
         // currently ON -> remember the live period(s) and remove them
         indMemory.set(key, current);
+        saveIndMemory();
         current.forEach((p) =>
           sendManual("remove_indicator", { timeframe: tf, indicator_id: `${kind}-${p}` }));
       } else {
         // currently OFF -> restore remembered period(s), or the first-time default
-        const periods = indMemory.get(key) || [DEFAULT_PERIODS[kind]];
+        const remembered = indMemory.get(key);
+        const periods = (Array.isArray(remembered) && remembered.length)
+          ? remembered : [DEFAULT_PERIODS[kind]];
         periods.forEach((p) =>
           sendManual("add_" + kind, { timeframe: tf, period: p }));
       }

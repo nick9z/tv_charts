@@ -69,9 +69,10 @@ The small dot in the top-right corner is the connection indicator: **green = liv
 Click an indicator toggle on a panel:
 - **EMA / SMA** — click to toggle on/off (no dialog). The first time you switch a kind
   on it uses a default period (**EMA 9 / SMA 21**); after that, toggling off remembers the
-  period(s) currently shown — including any the AI set — and toggling back on restores them
-  for the rest of the session. Multiple periods can coexist (each gets its own color); set
-  custom periods via the AI.
+  period(s) currently shown — including any the AI set — and toggling back on restores them.
+  The remembered periods are saved in the browser's **localStorage** (key
+  `tvcharts.indMemory`), so they survive reloads and browser restarts. Multiple periods can
+  coexist (each gets its own color); set custom periods via the AI.
 - **VWAP** — anchored VWAP; by default anchored **14 bars back** from the latest bar on
   whatever timeframe the chart is on (`DEFAULT_LOOKBACK_BARS`). Toggle off to remove.
 - **VP** — Volume Profile over the **last 14 bars** by default, drawing the value-area
