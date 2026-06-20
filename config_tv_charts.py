@@ -46,6 +46,10 @@ DEFAULT_TF = {1: ["D"], 2: ["D", "4H"], 4: ["D", "4H", "1H", "15m"]}
 HISTORY_BARS = 1000                                  # bars per tf on (re)load
 VP_BINS = 50                                          # volume-profile buckets
 VP_VALUE_AREA = 0.70                                  # 70% value area band
+# Default lookback for VWAP anchor / Volume Profile range when the AI or user
+# does not specify one: start this many days before the latest loaded bar.
+# NOTE: on high timeframes 14 days is only a handful of bars (W ~2, M <1).
+DEFAULT_LOOKBACK_DAYS = 14
 
 # ---- Storage -----------------------------------------------------------
 DB_PATH = "tv_charts.db"                              # wiped on every launch

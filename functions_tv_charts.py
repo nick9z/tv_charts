@@ -740,14 +740,34 @@ async def add_sma(timeframe: str, period: int) -> dict:
     return {"ok": True, "id": iid}
 
 
+def _default_lookback_ts(symbol: str, timeframe: str) -> int:
+    """Default VWAP-anchor / VP-start time when none is given.
+
+    Returns DEFAULT_LOOKBACK_DAYS before the latest loaded bar for
+    (symbol, timeframe), falling back to wall-clock now minus the lookback if
+    no bars are cached yet. UNIX seconds.
+    """
+    lookback = C.DEFAULT_LOOKBACK_DAYS * 86400
+    o = read_ohlcv(symbol, timeframe)
+    if len(o["time"]):
+        return int(o["time"][-1]) - lookback
+    return int(time.time()) - lookback
+
+
 async def add_vwap(timeframe: str, anchor_time: Optional[int] = None) -> dict:
-    """Add (or re-anchor) an anchored VWAP. Default anchor = first loaded bar."""
+    """Add (or re-anchor) an anchored VWAP.
+
+    Default anchor (anchor_time=None) = DEFAULT_LOOKBACK_DAYS (14) before the
+    latest loaded bar. The VWAP anchor is clamped to the first available bar.
+    """
     slot, err = _resolve_slot(timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     iid = "vwap"
+    if anchor_time is None:
+        anchor_time = _default_lookback_ts(_scene["asset"]["api_symbol"], timeframe)
     cfg = {"id": iid, "kind": "vwap",
-           "anchor_time": int(anchor_time) if anchor_time is not None else None,
+           "anchor_time": int(anchor_time),
            "color": C.VWAP_COLOR}
     slot["indicators"][iid] = cfg
     await rebroadcast_indicator(slot, cfg)
@@ -757,13 +777,19 @@ async def add_vwap(timeframe: str, anchor_time: Optional[int] = None) -> dict:
 async def add_volume_profile(timeframe: str, start_time: Optional[int] = None,
                              end_time: Optional[int] = None,
                              bins: int = C.VP_BINS) -> dict:
-    """Add (or re-range) a Volume Profile. Returns {poc, vah, val}."""
+    """Add (or re-range) a Volume Profile. Returns {poc, vah, val}.
+
+    Default range start (start_time=None) = DEFAULT_LOOKBACK_DAYS (14) before
+    the latest loaded bar; end_time=None means the latest bar.
+    """
     slot, err = _resolve_slot(timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     iid = "vp"
+    if start_time is None:
+        start_time = _default_lookback_ts(_scene["asset"]["api_symbol"], timeframe)
     cfg = {"id": iid, "kind": "vp",
-           "start_time": int(start_time) if start_time is not None else None,
+           "start_time": int(start_time),
            "end_time": int(end_time) if end_time is not None else None,
            "bins": int(bins)}
     slot["indicators"][iid] = cfg
@@ -1084,7 +1110,7 @@ def register_mcp_tools(mcp) -> None:
     @mcp.tool()
     async def add_vwap_tool(timeframe: str, anchor_time: Optional[int] = None) -> dict:
         """Add or re-anchor an anchored VWAP on `timeframe`. anchor_time is
-        UNIX seconds; default anchor = first loaded bar."""
+        UNIX seconds; default anchor = 14 days before the latest bar."""
         return await add_vwap(timeframe, anchor_time)
 
     @mcp.tool()
@@ -1092,7 +1118,7 @@ def register_mcp_tools(mcp) -> None:
                                       end_time: Optional[int] = None,
                                       bins: int = C.VP_BINS) -> dict:
         """Add or re-range a Volume Profile on `timeframe`. Returns poc/vah/val.
-        start_time/end_time are UNIX seconds (default = full loaded window)."""
+        start_time/end_time are UNIX seconds (default range = last 14 days)."""
         return await add_volume_profile(timeframe, start_time, end_time, bins)
 
     @mcp.tool()
