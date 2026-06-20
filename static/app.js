@@ -18,6 +18,14 @@
   let asset = { display: "", api_symbol: "" };
   let ws = null;
 
+  // EMA/SMA toggle defaults (used the first time a kind is switched on with no
+  // remembered periods).
+  const DEFAULT_PERIODS = { ema: 9, sma: 21 };
+  // Remembers the period(s) shown when EMA/SMA is toggled off, keyed
+  // `${timeframe}:${kind}`, so toggling back on restores them for the rest of
+  // the page session (including any periods the AI set).
+  const indMemory = new Map();
+
   // ---- dynamic load of Lightweight Charts, then boot ----
   function loadLWC() {
     return new Promise((resolve, reject) => {
@@ -190,14 +198,21 @@
   function toggleIndicator(panel, kind) {
     const tf = panel.timeframe;
     if (kind === "ema" || kind === "sma") {
-      const def = kind === "ema" ? "50" : "200";
-      const p = window.prompt(`${kind.toUpperCase()} period`, def);
-      if (!p) return;
-      const id = `${kind}-${parseInt(p, 10)}`;
-      if (panel.indicatorIds.has(id)) {
-        sendManual("remove_indicator", { timeframe: tf, indicator_id: id });
+      // Toggle on/off (no dialog). Periods in use are remembered across toggles.
+      const key = `${tf}:${kind}`;
+      const current = [...panel.indicatorIds]
+        .filter((id) => id.startsWith(kind + "-"))
+        .map((id) => parseInt(id.split("-")[1], 10));
+      if (current.length) {
+        // currently ON -> remember the live period(s) and remove them
+        indMemory.set(key, current);
+        current.forEach((p) =>
+          sendManual("remove_indicator", { timeframe: tf, indicator_id: `${kind}-${p}` }));
       } else {
-        sendManual("add_" + kind, { timeframe: tf, period: parseInt(p, 10) });
+        // currently OFF -> restore remembered period(s), or the first-time default
+        const periods = indMemory.get(key) || [DEFAULT_PERIODS[kind]];
+        periods.forEach((p) =>
+          sendManual("add_" + kind, { timeframe: tf, period: p }));
       }
     } else if (kind === "vwap") {
       if (panel.indicatorIds.has("vwap"))
