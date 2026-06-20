@@ -743,23 +743,24 @@ async def add_sma(timeframe: str, period: int) -> dict:
 def _default_lookback_ts(symbol: str, timeframe: str) -> int:
     """Default VWAP-anchor / VP-start time when none is given.
 
-    Looks back a timeframe-aware number of days (DEFAULT_LOOKBACK_DAYS map)
-    before the latest loaded bar for (symbol, timeframe), falling back to
-    wall-clock now minus the lookback if no bars are cached yet. UNIX seconds.
+    Returns the open time of the bar DEFAULT_LOOKBACK_BARS back from the latest
+    loaded bar for (symbol, timeframe) -- i.e. a window of the last N bars on
+    whatever timeframe is in view. Clamps to the first available bar if fewer
+    than N are loaded; falls back to wall-clock now if none are cached. UNIX seconds.
     """
-    days = C.DEFAULT_LOOKBACK_DAYS.get(timeframe, C.DEFAULT_LOOKBACK_DAYS_FALLBACK)
-    lookback = days * 86400
     o = read_ohlcv(symbol, timeframe)
-    if len(o["time"]):
-        return int(o["time"][-1]) - lookback
-    return int(time.time()) - lookback
+    n = len(o["time"])
+    if n == 0:
+        return int(time.time())
+    idx = max(0, n - C.DEFAULT_LOOKBACK_BARS)
+    return int(o["time"][idx])
 
 
 async def add_vwap(timeframe: str, anchor_time: Optional[int] = None) -> dict:
     """Add (or re-anchor) an anchored VWAP.
 
-    Default anchor (anchor_time=None) = DEFAULT_LOOKBACK_DAYS (14) before the
-    latest loaded bar. The VWAP anchor is clamped to the first available bar.
+    Default anchor (anchor_time=None) = DEFAULT_LOOKBACK_BARS (14) bars before
+    the latest loaded bar. The VWAP anchor is clamped to the first available bar.
     """
     slot, err = _resolve_slot(timeframe=timeframe)
     if err:
@@ -780,8 +781,8 @@ async def add_volume_profile(timeframe: str, start_time: Optional[int] = None,
                              bins: int = C.VP_BINS) -> dict:
     """Add (or re-range) a Volume Profile. Returns {poc, vah, val}.
 
-    Default range start (start_time=None) = DEFAULT_LOOKBACK_DAYS (14) before
-    the latest loaded bar; end_time=None means the latest bar.
+    Default range start (start_time=None) = DEFAULT_LOOKBACK_BARS (14) bars
+    before the latest loaded bar; end_time=None means the latest bar.
     """
     slot, err = _resolve_slot(timeframe=timeframe)
     if err:
@@ -1111,7 +1112,7 @@ def register_mcp_tools(mcp) -> None:
     @mcp.tool()
     async def add_vwap_tool(timeframe: str, anchor_time: Optional[int] = None) -> dict:
         """Add or re-anchor an anchored VWAP on `timeframe`. anchor_time is
-        UNIX seconds; default anchor = 14 days before the latest bar."""
+        UNIX seconds; default anchor = 14 bars before the latest bar."""
         return await add_vwap(timeframe, anchor_time)
 
     @mcp.tool()
@@ -1119,7 +1120,7 @@ def register_mcp_tools(mcp) -> None:
                                       end_time: Optional[int] = None,
                                       bins: int = C.VP_BINS) -> dict:
         """Add or re-range a Volume Profile on `timeframe`. Returns poc/vah/val.
-        start_time/end_time are UNIX seconds (default range = last 14 days)."""
+        start_time/end_time are UNIX seconds (default range = last 14 bars)."""
         return await add_volume_profile(timeframe, start_time, end_time, bins)
 
     @mcp.tool()
