@@ -67,10 +67,27 @@ app = FastAPI(title="tv_charts", lifespan=lifespan)
 
 
 # ---- Web UI + static ---------------------------------------------------
+def _asset_version() -> str:
+    """Cache-busting token = newest mtime of the frontend assets.
+
+    Bumps automatically whenever app.js/style.css change, so a normal browser
+    refresh always pulls the latest frontend (no hard-refresh needed).
+    """
+    newest = 0.0
+    for name in ("app.js", "style.css"):
+        try:
+            newest = max(newest, os.path.getmtime(os.path.join(STATIC_DIR, name)))
+        except OSError:
+            pass
+    return str(int(newest))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """Serve the chart terminal page."""
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    """Serve the chart terminal page with cache-busting asset versions."""
+    with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    return HTMLResponse(html.replace("__ASSET_V__", _asset_version()))
 
 
 @app.get("/config.js")
