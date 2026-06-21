@@ -54,6 +54,19 @@ DEFAULT_LOOKBACK_BARS = 14
 
 # ---- Storage -----------------------------------------------------------
 DB_PATH = "tv_charts.db"                              # wiped on every launch
+SNAPSHOT_DIR = "img"                                  # chart snapshots (kept)
+
+# ---- Auto-refresh ------------------------------------------------------
+# 15m is the smallest timeframe, so reconcile data on the 15-minute boundary.
+# A few seconds after each close, force a REST refetch, then retry to catch a
+# late-printing candle. All offsets are seconds relative to the boundary.
+REFRESH_PERIOD_S = 15 * 60                            # 15-minute grid
+REFRESH_OFFSETS_S = [5, 65, 125]                      # +5s, +1m5s, +2m5s
+
+# ---- Trade setup colors ------------------------------------------------
+SETUP_ENTRY_COLOR = "#e0e0e0"                         # entry (neutral)
+SETUP_STOP_COLOR = "#ef5350"                          # stop (red)
+SETUP_TARGET_COLOR = "#26a69a"                        # targets (green)
 
 # ---- Frontend pin ------------------------------------------------------
 # Lightweight Charts v4.2.x (v5 changed the series-creation API).

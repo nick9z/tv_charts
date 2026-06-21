@@ -72,13 +72,20 @@ The small dot in the top-right corner is the connection indicator: **green = liv
   Switching reloads every chart for the new asset.
 - **Layout** — `1`, `2`, or `4` panels (single / stacked / 2×2 grid).
 - **Refresh** — reloads all charts for the current asset.
+- **Sync** — toggles crosshair sync across all charts (see §1.11). The setting is
+  remembered in the browser.
 - **Log** — toggles a side panel showing recent AI/manual actions.
 
 **Each chart panel:**
+- **Slot badge** — the number at the top-left of each panel is its **slot id**
+  (1 = top-left, 2 = top-right, 3 = bottom-left, 4 = bottom-right). This is how you
+  refer to a chart when talking to the AI — *"put the 50 EMA on slot 2"* — which
+  matters now that the **same timeframe can appear on more than one chart** (§1.10).
 - **Timeframe picker** (`15m 1H 4H D W M`) — single-select; click to change that
-  panel's timeframe.
+  panel's timeframe. The same timeframe may be set on several panels.
 - **Last price + % change** since the start of the loaded window.
 - **Indicator toggles** — `EMA · SMA · VWAP · VP · Vol` for manual use.
+- **📷 camera** — saves a PNG of that chart to the server's `img/` folder (see §1.9).
 
 ## 1.5 Adding indicators by hand
 
@@ -139,10 +146,59 @@ Anything the AI does appears on the page instantly, and anything you do on the p
 sent to the server and reflected back — there is a single authoritative state. Open the
 **Log** panel to watch the AI's actions land in real time.
 
-## 1.9 Troubleshooting
+## 1.9 Snapshots (camera)
+
+Click the **📷** on any chart to save a PNG of that chart — candles plus whatever
+overlays are showing — to the server's **`img/`** folder. Files are named
+`ASSET_YYYYMMDD_HHMM.png` (e.g. `BTCUSDT.P_20260621_1529.png`) and a small label is
+burned into the corner so the image is self-identifying. The folder is **not** wiped on
+restart, so snapshots are your durable reference history. The AI can also snapshot a
+chart for you (`snapshot_chart_tool`), which is handy for archiving a trade setup right
+after it draws it — that needs a browser tab open on the chart page, since the picture is
+rendered in the browser.
+
+## 1.10 The same timeframe on more than one chart
+
+Charts are now addressed by their **slot id** (the badge), not by their timeframe, so you
+can show the **same timeframe in several panels** — e.g. four **Daily** charts, each
+holding a different trade scenario or indicator set. Tell the AI which one you mean by
+slot: *"slot 1 is my base case, draw the breakout setup on slot 2."* A bare timeframe
+still works when only one chart shows it; if several do, the AI is told to ask you for a
+slot id.
+
+## 1.11 Crosshair sync
+
+Click **Sync** in the top bar to link the crosshair across every chart: hover a candle in
+one panel and the same point in time **and** price is marked on all the others — useful
+for lining up a level across timeframes. It works even when the charts are on different
+timeframes (time is matched absolutely). Click **Sync** again to unlink. The on/off state
+is remembered in the browser.
+
+## 1.12 Driving the charts from another project
+
+The charts are a **shared screen**: any Claude session on the Beelink can paint on them by
+talking to the **one** `tv_charts` MCP server — there's nothing new to wire per project.
+This is built for a companion analysis project (e.g. BTC trade-setup analysis) to *show
+its thinking on the charts*:
+
+1. In that project, register the server once:
+   `claude mcp add --transport http tv_charts http://localhost:8800/mcp`
+   (or add it to that repo's `.mcp.json`).
+2. Make sure the charts are up — run `~/ai_projects/tv_charts/tv_charts.sh` (starts the
+   server if needed and opens the browser).
+3. Ask that session to lay out and annotate, e.g. *"give me four Daily charts and put each
+   trade scenario on its own one."* It will `set_layout(4)`, set each slot's timeframe
+   (duplicates allowed), then `apply_trade_setup` per chart — entry / stop / targets drawn
+   as a labelled group with the reward:risk for each target — and optionally snapshot each.
+
+To remove a setup later: *"clear the setup on slot 2"* (`clear_setup_tool`).
+
+## 1.13 Troubleshooting
 
 - **Red connection dot / blank charts** — the server isn't running or the LAN IP/port is
   wrong. Confirm `python main_tv_charts.py` is up and you used port `8800`.
+- **"timeframe X is shown on multiple charts…"** from the AI — you have that timeframe on
+  more than one chart; tell it which **slot** to use (the badge number).
 - **"timeframe X is not currently displayed"** from the AI — that timeframe isn't in the
   current layout. Ask it to set the panel to that timeframe first.
 - **No live updates** — check the server console for `[bybit-ws]` reconnect messages; the
@@ -195,6 +251,7 @@ AI client  --MCP (streamable HTTP /mcp)-->  tv_charts (one uvicorn process)  --W
     index.html             # frontend shell
     app.js                 # chart logic + /ws client + window.chartAPI
     style.css              # dark theme
+  img/                     # saved chart snapshots (PNGs; folder tracked, files not)
   requirements.txt
   README.md                # this file (user manual + build docs)
   tv_charts_spec.md        # the original build brief (in the parent dir)
@@ -243,11 +300,29 @@ The evaluator is deliberately reusable so v2 can run it on a timer for push aler
 ## 2.7 Scene model & `/ws` protocol
 
 In-memory scene: `{asset, layout∈{1,2,4}, slots:[{slot_id, timeframe, indicators, drawings}]}`.
-Charts are addressed **by timeframe** (unique within a layout; `slot_id` is a fallback).
-Server→browser messages: `scene`, `candles`, `candle_update`, `indicator`,
-`remove_indicator`, `drawing`, `clear_drawings`, `ack`. Browser→server: `hello` (triggers a
-full scene + per-slot data push) and `manual` (on-page user actions, applied server-side then
-broadcast back).
+Charts are addressed **by `slot_id`** (the primary key, unique and stable by grid position);
+a bare `timeframe` is a convenience that resolves only when **exactly one** chart shows it,
+otherwise `_resolve_slot` returns an error listing the candidate slot ids. This is what lets
+the **same timeframe live in multiple slots**.
+
+- **Per-chart** messages carry `slot_id`: `indicator`, `remove_indicator`, `drawing`
+  (kinds `hline` / `trendline` / `setup`), `remove_drawing`, `clear_drawings`,
+  `snapshot_request`.
+- **Market-data** messages stay keyed by `timeframe` (`candles`, `candle_update`) because the
+  data is identical across charts on that timeframe; the browser fans each out to every panel
+  showing it.
+- Browser→server: `hello` (full scene + per-slot data push) and `manual` (on-page actions —
+  now addressed by `slot_id` — applied server-side then broadcast back).
+
+A **trade setup** is stored as one grouped `drawing` of kind `setup`
+(`{direction, entry, stop, targets:[{price, rr}], …}`) so it appears in the scene and clears
+as a unit. **Snapshots** are captured in the browser (`chart.takeScreenshot()` + the VP
+overlay + a burned-in label) and POSTed to **`POST /snapshot`**, which writes the PNG to
+`img/` with a sanitised `ASSET_YYYYMMDD_HHMM.png` name.
+
+A background **`refresh_loop`** (alongside the Bybit WS task) force-refetches every active
+timeframe a few seconds after each 15-minute boundary, then again at +1m and +2m, so a
+freshly-closed candle is reconciled even if its WS `confirm` was missed.
 
 ## 2.8 MCP server
 
@@ -264,20 +339,28 @@ Mounted at **`/mcp`** (streamable HTTP). **Verified pattern for mcp 1.28.0:**
 > Re-verify this pattern if `mcp` is upgraded — the streamable-HTTP mounting + lifespan API
 > has changed across versions.
 
-**Tools** (19). Names that would shadow internal helpers carry a `_tool` suffix on the wire:
+**Tools** (22). Names that would shadow internal helpers carry a `_tool` suffix on the wire:
 `get_scene`, `set_asset_tool`, `set_layout_tool`, `set_slot_timeframe_tool`, `list_assets`,
 `list_timeframes`, `add_ema_tool`, `add_sma_tool`, `add_vwap_tool`,
 `add_volume_profile_tool`, `toggle_volume_pane_tool`, `remove_indicator_tool`,
-`list_indicators_tool`, `draw_hline_tool`, `draw_trendline_tool`, `clear_drawings_tool`,
-`get_candles_tool`, `get_indicator_values_tool`, `check_condition`. All return
-`{ok, …}` except `check_condition`, which returns the condition dict above.
+`list_indicators_tool`, `draw_hline_tool`, `draw_trendline_tool`, **`apply_trade_setup_tool`**,
+**`clear_setup_tool`**, `clear_drawings_tool`, **`snapshot_chart_tool`**, `get_candles_tool`,
+`get_indicator_values_tool`, `check_condition`. All return `{ok, …}` except `check_condition`,
+which returns the condition dict above.
+
+Every chart-targeting tool takes **`slot_id`** (preferred) and/or **`timeframe`** — pass
+`slot_id` to address a specific chart when several share a timeframe.
+`apply_trade_setup_tool(direction, entry, stop, targets, slot_id|timeframe, label?)` draws the
+setup and returns the risk and per-target reward:risk; `snapshot_chart_tool` asks the browser
+to save a PNG of a chart to `img/`.
 
 ## 2.9 Config reference
 
 All knobs live at the top of `config_tv_charts.py`: `HOST/PORT`, `CATEGORY`, Bybit REST/WS
 URLs, `ASSETS` + `DEFAULT_ASSET`, `TIMEFRAMES` + `TF_TO_INTERVAL`, `DEFAULT_LAYOUT` +
-`DEFAULT_TF`, `HISTORY_BARS`, `VP_BINS`, `VP_VALUE_AREA`, `DB_PATH`, the LWC CDN url, and the
-overlay color palettes.
+`DEFAULT_TF`, `HISTORY_BARS`, `VP_BINS`, `VP_VALUE_AREA`, `DEFAULT_LOOKBACK_BARS`, `DB_PATH`,
+`SNAPSHOT_DIR`, the auto-refresh cadence (`REFRESH_PERIOD_S` / `REFRESH_OFFSETS_S`), the LWC
+CDN url, and the overlay + trade-setup color palettes (`SETUP_ENTRY/STOP/TARGET_COLOR`).
 
 ## 2.10 Verification performed at build time
 

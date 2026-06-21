@@ -7,6 +7,9 @@ __pycache__/
 *.db
 tv_charts.db
 
+# Chart snapshots are local reference artifacts; keep the folder, not the PNGs
+img/*.png
+
 # Editor / OS
 .DS_Store
 *.swp

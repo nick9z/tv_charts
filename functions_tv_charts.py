@@ -22,8 +22,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import re
 import sqlite3
 import time
 from typing import Any, Optional
@@ -90,22 +92,31 @@ def slot_by_id(slot_id: int) -> Optional[dict]:
 
 def _resolve_slot(timeframe: Optional[str] = None,
                   slot_id: Optional[int] = None) -> tuple[Optional[dict], Optional[str]]:
-    """Resolve a slot by timeframe (primary) or slot_id (fallback).
+    """Resolve a slot by slot_id (primary) or timeframe (convenience).
+
+    slot_id addresses a chart unambiguously even when several charts show the
+    same timeframe. A bare `timeframe` only resolves when exactly one chart
+    shows it; if more than one does, the caller must pass slot_id.
 
     Returns (slot, error_message). Exactly one of slot/error is non-None.
     """
-    if timeframe is not None:
-        s = slot_by_timeframe(timeframe)
-        if s is None:
-            shown = [x["timeframe"] for x in _scene["slots"]]
-            return None, f"timeframe {timeframe!r} is not currently displayed (showing {shown})"
-        return s, None
     if slot_id is not None:
         s = slot_by_id(slot_id)
         if s is None:
-            return None, f"slot_id {slot_id} does not exist"
+            ids = [x["slot_id"] for x in _scene["slots"]]
+            return None, f"slot_id {slot_id} does not exist (slots: {ids})"
         return s, None
-    return None, "must provide a timeframe (or slot_id)"
+    if timeframe is not None:
+        matches = [s for s in _scene["slots"] if s["timeframe"] == timeframe]
+        if not matches:
+            shown = [x["timeframe"] for x in _scene["slots"]]
+            return None, f"timeframe {timeframe!r} is not currently displayed (showing {shown})"
+        if len(matches) > 1:
+            ids = [s["slot_id"] for s in matches]
+            return None, (f"timeframe {timeframe!r} is shown on multiple charts "
+                          f"(slot_ids {ids}); pass slot_id to pick one")
+        return matches[0], None
+    return None, "must provide a slot_id (or a timeframe shown on exactly one chart)"
 
 
 # =============================================================
@@ -445,17 +456,21 @@ def _gap_pct(close: float, indicator: float) -> float:
     return (close - indicator) / indicator * 100.0 if indicator else 0.0
 
 
-def evaluate(timeframe: str, test: str, **params) -> dict:
-    """Evaluate a condition on the last CLOSED bar of `timeframe`.
+def evaluate(timeframe: Optional[str] = None, test: str = "", slot_id: Optional[int] = None,
+             **params) -> dict:
+    """Evaluate a condition on the last CLOSED bar of a chart (by slot_id or timeframe).
 
     Returns {result, test, timeframe, ...details, bar_time, confirmed:true}.
     On any structural problem returns {result:False, error:...}.
     """
-    slot = slot_by_timeframe(timeframe)
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
+    if err:
+        return {"result": False, "test": test, "confirmed": True, "error": err}
+    timeframe = slot["timeframe"]
     symbol = _scene["asset"]["api_symbol"]
     o = read_ohlcv(symbol, timeframe)
     base = {"result": False, "test": test, "timeframe": timeframe,
-            "confirmed": True}
+            "slot_id": slot["slot_id"], "confirmed": True}
     if len(o["time"]) == 0:
         return {**base, "error": "no candles loaded for this timeframe"}
 
@@ -617,15 +632,19 @@ async def push_slot_data(slot: dict, ws=None) -> None:
     """
     symbol = _scene["asset"]["api_symbol"]
     tf = slot["timeframe"]
+    sid = slot["slot_id"]
     target = (lambda m: _send(ws, m)) if ws is not None else broadcast
 
+    # Candles are keyed by timeframe (identical across charts sharing a tf);
+    # the browser fans them out to every panel on that timeframe. Indicators
+    # and drawings are per-chart, so they carry slot_id.
     await target({"type": "candles", "timeframe": tf,
                   "data": read_candles(symbol, tf)})
     for cfg in slot["indicators"].values():
         payload = compute_indicator_payload(symbol, tf, cfg)
-        await target({"type": "indicator", "timeframe": tf, **payload})
+        await target({"type": "indicator", "slot_id": sid, "timeframe": tf, **payload})
     for d in slot["drawings"]:
-        await target({"type": "drawing", "timeframe": tf, **d})
+        await target({"type": "drawing", "slot_id": sid, "timeframe": tf, **d})
 
 
 async def push_full_scene(ws=None) -> None:
@@ -640,7 +659,8 @@ async def rebroadcast_indicator(slot: dict, cfg: dict) -> None:
     """Recompute one indicator and broadcast its updated series."""
     payload = compute_indicator_payload(_scene["asset"]["api_symbol"],
                                          slot["timeframe"], cfg)
-    await broadcast({"type": "indicator", "timeframe": slot["timeframe"], **payload})
+    await broadcast({"type": "indicator", "slot_id": slot["slot_id"],
+                     "timeframe": slot["timeframe"], **payload})
 
 
 # =============================================================
@@ -699,8 +719,7 @@ async def set_slot_timeframe(slot_id: int, timeframe: str) -> dict:
     slot = slot_by_id(slot_id)
     if slot is None:
         return {"ok": False, "error": f"slot_id {slot_id} does not exist"}
-    if any(s["timeframe"] == timeframe and s is not slot for s in _scene["slots"]):
-        return {"ok": False, "error": f"timeframe {timeframe} already shown in another slot"}
+    # Duplicate timeframes are allowed (a chart is addressed by slot_id).
     slot["timeframe"] = timeframe
     slot["indicators"] = {}                          # indicators are tf-specific
     slot["drawings"] = []
@@ -714,9 +733,10 @@ def _next_color(slot: dict, kind: str, palette: list[str]) -> str:
     return palette[used % len(palette)]
 
 
-async def add_ema(timeframe: str, period: int) -> dict:
-    """Add an EMA(period) overlay to the chart on `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+async def add_ema(timeframe: Optional[str] = None, period: int = 9,
+                  slot_id: Optional[int] = None) -> dict:
+    """Add an EMA(period) overlay to a chart (by slot_id or timeframe)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     iid = f"ema-{period}"
@@ -724,12 +744,13 @@ async def add_ema(timeframe: str, period: int) -> dict:
            "color": _next_color(slot, "ema", C.EMA_COLORS)}
     slot["indicators"][iid] = cfg
     await rebroadcast_indicator(slot, cfg)
-    return {"ok": True, "id": iid}
+    return {"ok": True, "id": iid, "slot_id": slot["slot_id"]}
 
 
-async def add_sma(timeframe: str, period: int) -> dict:
-    """Add an SMA(period) overlay to the chart on `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+async def add_sma(timeframe: Optional[str] = None, period: int = 21,
+                  slot_id: Optional[int] = None) -> dict:
+    """Add an SMA(period) overlay to a chart (by slot_id or timeframe)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     iid = f"sma-{period}"
@@ -737,7 +758,7 @@ async def add_sma(timeframe: str, period: int) -> dict:
            "color": _next_color(slot, "sma", C.SMA_COLORS)}
     slot["indicators"][iid] = cfg
     await rebroadcast_indicator(slot, cfg)
-    return {"ok": True, "id": iid}
+    return {"ok": True, "id": iid, "slot_id": slot["slot_id"]}
 
 
 def _default_lookback_ts(symbol: str, timeframe: str) -> int:
@@ -756,40 +777,44 @@ def _default_lookback_ts(symbol: str, timeframe: str) -> int:
     return int(o["time"][idx])
 
 
-async def add_vwap(timeframe: str, anchor_time: Optional[int] = None) -> dict:
-    """Add (or re-anchor) an anchored VWAP.
+async def add_vwap(timeframe: Optional[str] = None, anchor_time: Optional[int] = None,
+                   slot_id: Optional[int] = None) -> dict:
+    """Add (or re-anchor) an anchored VWAP (by slot_id or timeframe).
 
     Default anchor (anchor_time=None) = DEFAULT_LOOKBACK_BARS (14) bars before
     the latest loaded bar. The VWAP anchor is clamped to the first available bar.
     """
-    slot, err = _resolve_slot(timeframe=timeframe)
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     iid = "vwap"
     if anchor_time is None:
-        anchor_time = _default_lookback_ts(_scene["asset"]["api_symbol"], timeframe)
+        anchor_time = _default_lookback_ts(_scene["asset"]["api_symbol"], slot["timeframe"])
     cfg = {"id": iid, "kind": "vwap",
            "anchor_time": int(anchor_time),
            "color": C.VWAP_COLOR}
     slot["indicators"][iid] = cfg
     await rebroadcast_indicator(slot, cfg)
-    return {"ok": True, "id": iid, "anchor_time": cfg["anchor_time"]}
+    return {"ok": True, "id": iid, "anchor_time": cfg["anchor_time"],
+            "slot_id": slot["slot_id"]}
 
 
-async def add_volume_profile(timeframe: str, start_time: Optional[int] = None,
+async def add_volume_profile(timeframe: Optional[str] = None,
+                             start_time: Optional[int] = None,
                              end_time: Optional[int] = None,
-                             bins: int = C.VP_BINS) -> dict:
-    """Add (or re-range) a Volume Profile. Returns {poc, vah, val}.
+                             bins: int = C.VP_BINS,
+                             slot_id: Optional[int] = None) -> dict:
+    """Add (or re-range) a Volume Profile (by slot_id or timeframe). Returns {poc, vah, val}.
 
     Default range start (start_time=None) = DEFAULT_LOOKBACK_BARS (14) bars
     before the latest loaded bar; end_time=None means the latest bar.
     """
-    slot, err = _resolve_slot(timeframe=timeframe)
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     iid = "vp"
     if start_time is None:
-        start_time = _default_lookback_ts(_scene["asset"]["api_symbol"], timeframe)
+        start_time = _default_lookback_ts(_scene["asset"]["api_symbol"], slot["timeframe"])
     cfg = {"id": iid, "kind": "vp",
            "start_time": int(start_time),
            "end_time": int(end_time) if end_time is not None else None,
@@ -797,12 +822,14 @@ async def add_volume_profile(timeframe: str, start_time: Optional[int] = None,
     slot["indicators"][iid] = cfg
     await rebroadcast_indicator(slot, cfg)               # fills poc/vah/val
     return {"ok": True, "id": iid, "poc": cfg.get("poc"),
-            "vah": cfg.get("vah"), "val": cfg.get("val")}
+            "vah": cfg.get("vah"), "val": cfg.get("val"),
+            "slot_id": slot["slot_id"]}
 
 
-async def toggle_volume_pane(timeframe: str, on: bool) -> dict:
-    """Show/hide the bottom volume histogram pane on `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+async def toggle_volume_pane(timeframe: Optional[str] = None, on: bool = True,
+                             slot_id: Optional[int] = None) -> dict:
+    """Show/hide the bottom volume histogram pane (by slot_id or timeframe)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     iid = "volume"
@@ -812,28 +839,33 @@ async def toggle_volume_pane(timeframe: str, on: bool) -> dict:
         await rebroadcast_indicator(slot, cfg)
     else:
         slot["indicators"].pop(iid, None)
-        await broadcast({"type": "remove_indicator", "timeframe": timeframe, "id": iid})
-    return {"ok": True, "on": bool(on)}
+        await broadcast({"type": "remove_indicator", "slot_id": slot["slot_id"],
+                         "timeframe": slot["timeframe"], "id": iid})
+    return {"ok": True, "on": bool(on), "slot_id": slot["slot_id"]}
 
 
-async def remove_indicator(timeframe: str, indicator_id: str) -> dict:
-    """Remove an indicator by id from the chart on `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+async def remove_indicator(timeframe: Optional[str] = None, indicator_id: str = "",
+                           slot_id: Optional[int] = None) -> dict:
+    """Remove an indicator by id from a chart (by slot_id or timeframe)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     if indicator_id not in slot["indicators"]:
-        return {"ok": False, "error": f"no indicator {indicator_id!r} on {timeframe}"}
+        return {"ok": False, "error": f"no indicator {indicator_id!r} on slot {slot['slot_id']}"}
     slot["indicators"].pop(indicator_id)
-    await broadcast({"type": "remove_indicator", "timeframe": timeframe, "id": indicator_id})
-    return {"ok": True, "id": indicator_id}
+    await broadcast({"type": "remove_indicator", "slot_id": slot["slot_id"],
+                     "timeframe": slot["timeframe"], "id": indicator_id})
+    return {"ok": True, "id": indicator_id, "slot_id": slot["slot_id"]}
 
 
-def list_indicators(timeframe: str) -> dict:
-    """List indicator configs currently on `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+def list_indicators(timeframe: Optional[str] = None,
+                    slot_id: Optional[int] = None) -> dict:
+    """List indicator configs currently on a chart (by slot_id or timeframe)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
-    return {"ok": True, "indicators": list(slot["indicators"].values())}
+    return {"ok": True, "slot_id": slot["slot_id"], "timeframe": slot["timeframe"],
+            "indicators": list(slot["indicators"].values())}
 
 
 # ---- drawings ----------------------------------------------------------
@@ -844,68 +876,171 @@ def _next_draw_id(prefix: str) -> str:
     return f"{prefix}-{_draw_counter}"
 
 
-async def draw_hline(timeframe: str, price: float, label: Optional[str] = None,
-                     color: Optional[str] = None) -> dict:
-    """Draw a horizontal price line on `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+async def draw_hline(timeframe: Optional[str] = None, price: float = 0.0,
+                     label: Optional[str] = None, color: Optional[str] = None,
+                     slot_id: Optional[int] = None) -> dict:
+    """Draw a horizontal price line on a chart (by slot_id or timeframe)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     d = {"id": _next_draw_id("hline"), "kind": "hline", "price": float(price),
          "label": label, "color": color or "#facc15"}
     slot["drawings"].append(d)
-    await broadcast({"type": "drawing", "timeframe": timeframe, **d})
-    return {"ok": True, "id": d["id"]}
+    await broadcast({"type": "drawing", "slot_id": slot["slot_id"],
+                     "timeframe": slot["timeframe"], **d})
+    return {"ok": True, "id": d["id"], "slot_id": slot["slot_id"]}
 
 
-async def draw_trendline(timeframe: str, t1: int, price1: float, t2: int,
-                         price2: float, label: Optional[str] = None,
-                         color: Optional[str] = None) -> dict:
-    """Draw a 2-point trendline on `timeframe` (t1/t2 = UNIX seconds)."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+async def draw_trendline(timeframe: Optional[str] = None, t1: int = 0, price1: float = 0.0,
+                         t2: int = 0, price2: float = 0.0, label: Optional[str] = None,
+                         color: Optional[str] = None,
+                         slot_id: Optional[int] = None) -> dict:
+    """Draw a 2-point trendline on a chart (t1/t2 = UNIX seconds)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     d = {"id": _next_draw_id("trend"), "kind": "trendline",
          "t1": int(t1), "price1": float(price1), "t2": int(t2), "price2": float(price2),
          "label": label, "color": color or "#22d3ee"}
     slot["drawings"].append(d)
-    await broadcast({"type": "drawing", "timeframe": timeframe, **d})
-    return {"ok": True, "id": d["id"]}
+    await broadcast({"type": "drawing", "slot_id": slot["slot_id"],
+                     "timeframe": slot["timeframe"], **d})
+    return {"ok": True, "id": d["id"], "slot_id": slot["slot_id"]}
 
 
-async def clear_drawings(timeframe: str) -> dict:
-    """Remove all drawings from `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+async def clear_drawings(timeframe: Optional[str] = None,
+                         slot_id: Optional[int] = None) -> dict:
+    """Remove all drawings (incl. trade setups) from a chart."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
     slot["drawings"] = []
-    await broadcast({"type": "clear_drawings", "timeframe": timeframe})
-    return {"ok": True}
+    await broadcast({"type": "clear_drawings", "slot_id": slot["slot_id"],
+                     "timeframe": slot["timeframe"]})
+    return {"ok": True, "slot_id": slot["slot_id"]}
+
+
+async def apply_trade_setup(direction: str, entry: float, stop: float,
+                            targets: list, label: Optional[str] = None,
+                            timeframe: Optional[str] = None,
+                            slot_id: Optional[int] = None) -> dict:
+    """Draw a trade setup (entry/stop/targets) as one labelled group on a chart.
+
+    Stored as a single 'setup' drawing so it shows in the scene and can be
+    cleared as a unit (clear_setup / clear_drawings). Returns risk and the
+    reward:risk for each target.
+    """
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
+    if err:
+        return {"ok": False, "error": err}
+    direction = (direction or "").lower()
+    if direction not in ("long", "short"):
+        return {"ok": False, "error": "direction must be 'long' or 'short'"}
+    entry, stop = float(entry), float(stop)
+    risk = abs(entry - stop)
+    if risk == 0:
+        return {"ok": False, "error": "entry and stop must differ"}
+    tgts = [{"price": float(t), "rr": round(abs(float(t) - entry) / risk, 2)}
+            for t in (targets or [])]
+    setup_id = _next_draw_id("setup")
+    d = {"id": setup_id, "kind": "setup", "direction": direction,
+         "entry": entry, "stop": stop, "targets": tgts, "risk": risk,
+         "label": label, "colors": {"entry": C.SETUP_ENTRY_COLOR,
+                                     "stop": C.SETUP_STOP_COLOR,
+                                     "target": C.SETUP_TARGET_COLOR}}
+    slot["drawings"].append(d)
+    await broadcast({"type": "drawing", "slot_id": slot["slot_id"],
+                     "timeframe": slot["timeframe"], **d})
+    return {"ok": True, "id": setup_id, "slot_id": slot["slot_id"],
+            "direction": direction, "entry": entry, "stop": stop,
+            "risk": risk, "targets": tgts}
+
+
+async def clear_setup(timeframe: Optional[str] = None, slot_id: Optional[int] = None,
+                      setup_id: Optional[str] = None) -> dict:
+    """Remove trade setups from a chart (all, or one by setup_id)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
+    if err:
+        return {"ok": False, "error": err}
+    removed, keep = [], []
+    for d in slot["drawings"]:
+        if d.get("kind") == "setup" and (setup_id is None or d["id"] == setup_id):
+            removed.append(d["id"])
+        else:
+            keep.append(d)
+    slot["drawings"] = keep
+    for rid in removed:
+        await broadcast({"type": "remove_drawing", "slot_id": slot["slot_id"],
+                         "timeframe": slot["timeframe"], "id": rid})
+    return {"ok": True, "removed": removed, "slot_id": slot["slot_id"]}
+
+
+async def request_snapshot(timeframe: Optional[str] = None,
+                           slot_id: Optional[int] = None) -> dict:
+    """Ask the browser to capture a chart and save it to img/ (see /snapshot)."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
+    if err:
+        return {"ok": False, "error": err}
+    if not _clients:
+        return {"ok": False, "error": "no browser connected; open the chart page first"}
+    await broadcast({"type": "snapshot_request", "slot_id": slot["slot_id"],
+                     "timeframe": slot["timeframe"]})
+    return {"ok": True, "slot_id": slot["slot_id"],
+            "note": "snapshot requested; the PNG will appear in img/"}
+
+
+def save_snapshot(asset_display: str, image_b64: str) -> str:
+    """Decode a base64 PNG (optionally a data: URL) and write it to SNAPSHOT_DIR.
+
+    Filename: {asset_display}_{YYYYMMDD}_{HHMM}.png (':' and unsafe chars
+    stripped; '.' kept). On collision a _2/_3... suffix is appended. Uses the
+    server's local time. Returns the saved path.
+    """
+    os.makedirs(C.SNAPSHOT_DIR, exist_ok=True)
+    if image_b64.strip().startswith("data:") and "," in image_b64:
+        image_b64 = image_b64.split(",", 1)[1]
+    raw = base64.b64decode(image_b64)
+    stamp = time.strftime("%Y%m%d_%H%M", time.localtime())
+    safe_asset = re.sub(r"[^A-Za-z0-9._-]", "", asset_display) or "chart"
+    base = f"{safe_asset}_{stamp}"
+    path = os.path.join(C.SNAPSHOT_DIR, base + ".png")
+    i = 2
+    while os.path.exists(path):
+        path = os.path.join(C.SNAPSHOT_DIR, f"{base}_{i}.png")
+        i += 1
+    with open(path, "wb") as f:
+        f.write(raw)
+    return path
 
 
 # ---- data reads for the AI --------------------------------------------
 
-def get_candles(timeframe: str, count: int = 200) -> dict:
-    """Return the most recent `count` OHLCV bars for `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+def get_candles(timeframe: Optional[str] = None, count: int = 200,
+                slot_id: Optional[int] = None) -> dict:
+    """Return the most recent `count` OHLCV bars for a chart."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
-    data = read_candles(_scene["asset"]["api_symbol"], timeframe, count=count)
-    return {"ok": True, "timeframe": timeframe, "candles": data}
+    tf = slot["timeframe"]
+    data = read_candles(_scene["asset"]["api_symbol"], tf, count=count)
+    return {"ok": True, "slot_id": slot["slot_id"], "timeframe": tf, "candles": data}
 
 
-def get_indicator_values(timeframe: str, indicator_id: str, count: int = 200) -> dict:
-    """Return the most recent `count` values of one indicator on `timeframe`."""
-    slot, err = _resolve_slot(timeframe=timeframe)
+def get_indicator_values(timeframe: Optional[str] = None, indicator_id: str = "",
+                         count: int = 200, slot_id: Optional[int] = None) -> dict:
+    """Return the most recent `count` values of one indicator on a chart."""
+    slot, err = _resolve_slot(slot_id=slot_id, timeframe=timeframe)
     if err:
         return {"ok": False, "error": err}
+    tf = slot["timeframe"]
     cfg = slot["indicators"].get(indicator_id)
     if cfg is None:
-        return {"ok": False, "error": f"no indicator {indicator_id!r} on {timeframe}"}
-    payload = compute_indicator_payload(_scene["asset"]["api_symbol"], timeframe, cfg)
+        return {"ok": False, "error": f"no indicator {indicator_id!r} on slot {slot['slot_id']}"}
+    payload = compute_indicator_payload(_scene["asset"]["api_symbol"], tf, cfg)
     series = payload.get("series", [])
     if count is not None and len(series) > count:
         series = series[-count:]
-    out = {"ok": True, "timeframe": timeframe, "id": indicator_id,
+    out = {"ok": True, "slot_id": slot["slot_id"], "timeframe": tf, "id": indicator_id,
            "kind": cfg["kind"], "values": series}
     if "meta" in payload:
         out["meta"] = payload["meta"]
@@ -917,7 +1052,14 @@ def get_indicator_values(timeframe: str, indicator_id: str, count: int = 200) ->
 # =============================================================
 
 async def handle_manual(action: str, params: dict) -> None:
-    """Apply an on-page user action received over /ws (then broadcasts happen)."""
+    """Apply an on-page user action received over /ws (then broadcasts happen).
+
+    Indicator/drawing actions address their chart by slot_id (the browser knows
+    each panel's id); timeframe is accepted too for backwards compatibility.
+    """
+    sid = params.get("slot_id")
+    sid = int(sid) if sid is not None else None
+    tf = params.get("timeframe")
     if action == "set_asset":
         await set_asset(params["symbol"])
     elif action == "set_layout":
@@ -925,20 +1067,21 @@ async def handle_manual(action: str, params: dict) -> None:
     elif action == "set_slot_timeframe":
         await set_slot_timeframe(int(params["slot_id"]), params["timeframe"])
     elif action == "add_ema":
-        await add_ema(params["timeframe"], int(params["period"]))
+        await add_ema(timeframe=tf, period=int(params["period"]), slot_id=sid)
     elif action == "add_sma":
-        await add_sma(params["timeframe"], int(params["period"]))
+        await add_sma(timeframe=tf, period=int(params["period"]), slot_id=sid)
     elif action == "add_vwap":
-        await add_vwap(params["timeframe"], params.get("anchor_time"))
+        await add_vwap(timeframe=tf, anchor_time=params.get("anchor_time"), slot_id=sid)
     elif action == "add_volume_profile":
-        await add_volume_profile(params["timeframe"], params.get("start_time"),
-                                 params.get("end_time"), int(params.get("bins", C.VP_BINS)))
+        await add_volume_profile(timeframe=tf, start_time=params.get("start_time"),
+                                 end_time=params.get("end_time"),
+                                 bins=int(params.get("bins", C.VP_BINS)), slot_id=sid)
     elif action == "toggle_volume_pane":
-        await toggle_volume_pane(params["timeframe"], bool(params["on"]))
+        await toggle_volume_pane(timeframe=tf, on=bool(params["on"]), slot_id=sid)
     elif action == "remove_indicator":
-        await remove_indicator(params["timeframe"], params["indicator_id"])
+        await remove_indicator(timeframe=tf, indicator_id=params["indicator_id"], slot_id=sid)
     elif action == "clear_drawings":
-        await clear_drawings(params["timeframe"])
+        await clear_drawings(timeframe=tf, slot_id=sid)
 
 
 # =============================================================
@@ -978,8 +1121,10 @@ async def _handle_ws_kline(topic: str, items: list[dict]) -> None:
         if closed:
             upsert_candle(api_symbol, tf, bar)
             # a newly closed bar changes indicators -> recompute & rebroadcast
-            slot = slot_by_timeframe(tf)
-            if slot is not None:
+            # for every chart showing this timeframe (duplicates allowed).
+            for slot in _scene["slots"]:
+                if slot["timeframe"] != tf:
+                    continue
                 for cfg in slot["indicators"].values():
                     await rebroadcast_indicator(slot, cfg)
         await broadcast({"type": "candle_update", "timeframe": tf,
@@ -1029,6 +1174,55 @@ async def bybit_ws_loop() -> None:
             except asyncio.TimeoutError:
                 pass
             backoff = min(backoff * 2, 30.0)
+
+
+# =============================================================
+# Periodic REST reconcile (15m boundary) -- complements the live WS feed
+# =============================================================
+
+async def refresh_all_active() -> None:
+    """Force-refetch history for every active (symbol, timeframe) and re-push.
+
+    Re-pushing slot data resends candles + indicators + drawings to the browser,
+    so a freshly closed bar is reflected even if its WS `confirm` was missed.
+    """
+    api = _scene["asset"]["api_symbol"]
+    if not api:
+        return
+    for tf in {slot["timeframe"] for slot in _scene["slots"]}:
+        try:
+            await ensure_loaded(api, tf, force=True)
+        except Exception as e:                       # pragma: no cover - network
+            print(f"[refresh] {tf}: {type(e).__name__}: {e}")
+    for slot in _scene["slots"]:
+        await push_slot_data(slot)
+
+
+async def refresh_loop() -> None:
+    """Reconcile data on the 15-minute boundary, with retries.
+
+    A few seconds after each :00/:15/:30/:45 (REFRESH_OFFSETS_S) force a REST
+    refetch of every active timeframe so the just-printed candle is captured;
+    the extra offsets catch a late-printing candle.
+    """
+    assert _ws_stop is not None
+    period = C.REFRESH_PERIOD_S
+    while not _ws_stop.is_set():
+        next_boundary = (int(time.time()) // period + 1) * period
+        for off in C.REFRESH_OFFSETS_S:
+            delay = next_boundary + off - time.time()
+            if delay > 0:
+                try:
+                    await asyncio.wait_for(_ws_stop.wait(), timeout=delay)
+                    return                            # stop requested
+                except asyncio.TimeoutError:
+                    pass
+            if _ws_stop.is_set():
+                return
+            try:
+                await refresh_all_active()
+            except Exception as e:                    # pragma: no cover - defensive
+                print(f"[refresh] {type(e).__name__}: {e}")
 
 
 # =============================================================
@@ -1099,83 +1293,138 @@ def register_mcp_tools(mcp) -> None:
         return {"ok": True, "timeframes": list(C.TIMEFRAMES)}
 
     # ---- indicators ----
+    # Charts are addressed by `slot_id` (1=top-left, shown on each panel),
+    # which is unambiguous even when several charts share a timeframe. A bare
+    # `timeframe` is also accepted when exactly one chart shows it.
     @mcp.tool()
-    async def add_ema_tool(timeframe: str, period: int) -> dict:
-        """Add an EMA(period) line to the chart on `timeframe`."""
-        return await add_ema(timeframe, period)
+    async def add_ema_tool(period: int, slot_id: Optional[int] = None,
+                           timeframe: Optional[str] = None) -> dict:
+        """Add an EMA(period) line to a chart (by slot_id, or timeframe if unique)."""
+        return await add_ema(timeframe=timeframe, period=period, slot_id=slot_id)
 
     @mcp.tool()
-    async def add_sma_tool(timeframe: str, period: int) -> dict:
-        """Add an SMA(period) line to the chart on `timeframe`."""
-        return await add_sma(timeframe, period)
+    async def add_sma_tool(period: int, slot_id: Optional[int] = None,
+                           timeframe: Optional[str] = None) -> dict:
+        """Add an SMA(period) line to a chart (by slot_id, or timeframe if unique)."""
+        return await add_sma(timeframe=timeframe, period=period, slot_id=slot_id)
 
     @mcp.tool()
-    async def add_vwap_tool(timeframe: str, anchor_time: Optional[int] = None) -> dict:
-        """Add or re-anchor an anchored VWAP on `timeframe`. anchor_time is
-        UNIX seconds; default anchor = 14 bars before the latest bar."""
-        return await add_vwap(timeframe, anchor_time)
+    async def add_vwap_tool(slot_id: Optional[int] = None, timeframe: Optional[str] = None,
+                            anchor_time: Optional[int] = None) -> dict:
+        """Add or re-anchor an anchored VWAP on a chart. anchor_time is UNIX
+        seconds; default anchor = 14 bars before the latest bar."""
+        return await add_vwap(timeframe=timeframe, anchor_time=anchor_time, slot_id=slot_id)
 
     @mcp.tool()
-    async def add_volume_profile_tool(timeframe: str, start_time: Optional[int] = None,
+    async def add_volume_profile_tool(slot_id: Optional[int] = None,
+                                      timeframe: Optional[str] = None,
+                                      start_time: Optional[int] = None,
                                       end_time: Optional[int] = None,
                                       bins: int = C.VP_BINS) -> dict:
-        """Add or re-range a Volume Profile on `timeframe`. Returns poc/vah/val.
+        """Add or re-range a Volume Profile on a chart. Returns poc/vah/val.
         start_time/end_time are UNIX seconds (default range = last 14 bars)."""
-        return await add_volume_profile(timeframe, start_time, end_time, bins)
+        return await add_volume_profile(timeframe=timeframe, start_time=start_time,
+                                        end_time=end_time, bins=bins, slot_id=slot_id)
 
     @mcp.tool()
-    async def toggle_volume_pane_tool(timeframe: str, on: bool) -> dict:
-        """Show (on=true) or hide the bottom volume histogram on `timeframe`."""
-        return await toggle_volume_pane(timeframe, on)
+    async def toggle_volume_pane_tool(on: bool, slot_id: Optional[int] = None,
+                                      timeframe: Optional[str] = None) -> dict:
+        """Show (on=true) or hide the bottom volume histogram on a chart."""
+        return await toggle_volume_pane(timeframe=timeframe, on=on, slot_id=slot_id)
 
     @mcp.tool()
-    async def remove_indicator_tool(timeframe: str, indicator_id: str) -> dict:
-        """Remove an indicator by id from `timeframe`."""
-        return await remove_indicator(timeframe, indicator_id)
+    async def remove_indicator_tool(indicator_id: str, slot_id: Optional[int] = None,
+                                    timeframe: Optional[str] = None) -> dict:
+        """Remove an indicator by id from a chart."""
+        return await remove_indicator(timeframe=timeframe, indicator_id=indicator_id,
+                                      slot_id=slot_id)
 
     @mcp.tool()
-    async def list_indicators_tool(timeframe: str) -> dict:
-        """List indicators currently on `timeframe`."""
-        return list_indicators(timeframe)
+    async def list_indicators_tool(slot_id: Optional[int] = None,
+                                   timeframe: Optional[str] = None) -> dict:
+        """List indicators currently on a chart."""
+        return list_indicators(timeframe=timeframe, slot_id=slot_id)
 
     # ---- drawings ----
     @mcp.tool()
-    async def draw_hline_tool(timeframe: str, price: float, label: Optional[str] = None,
+    async def draw_hline_tool(price: float, slot_id: Optional[int] = None,
+                              timeframe: Optional[str] = None, label: Optional[str] = None,
                               color: Optional[str] = None) -> dict:
-        """Draw a horizontal line at `price` on `timeframe`."""
-        return await draw_hline(timeframe, price, label, color)
+        """Draw a horizontal line at `price` on a chart."""
+        return await draw_hline(timeframe=timeframe, price=price, label=label,
+                                color=color, slot_id=slot_id)
 
     @mcp.tool()
-    async def draw_trendline_tool(timeframe: str, t1: int, price1: float, t2: int,
-                                  price2: float, label: Optional[str] = None,
+    async def draw_trendline_tool(t1: int, price1: float, t2: int, price2: float,
+                                  slot_id: Optional[int] = None,
+                                  timeframe: Optional[str] = None,
+                                  label: Optional[str] = None,
                                   color: Optional[str] = None) -> dict:
-        """Draw a 2-point trendline on `timeframe`. t1/t2 are UNIX seconds."""
-        return await draw_trendline(timeframe, t1, price1, t2, price2, label, color)
+        """Draw a 2-point trendline on a chart. t1/t2 are UNIX seconds."""
+        return await draw_trendline(timeframe=timeframe, t1=t1, price1=price1, t2=t2,
+                                    price2=price2, label=label, color=color, slot_id=slot_id)
 
     @mcp.tool()
-    async def clear_drawings_tool(timeframe: str) -> dict:
-        """Remove all drawings from `timeframe`."""
-        return await clear_drawings(timeframe)
+    async def apply_trade_setup_tool(direction: str, entry: float, stop: float,
+                                     targets: list[float], slot_id: Optional[int] = None,
+                                     timeframe: Optional[str] = None,
+                                     label: Optional[str] = None) -> dict:
+        """Draw a trade setup (entry/stop/targets) as a labelled group on a chart.
+
+        direction is 'long' or 'short'. `targets` is a list of take-profit prices.
+        Renders entry (neutral), stop (red), and each target (green) as horizontal
+        lines and returns risk and per-target reward:risk. Address the chart by
+        slot_id (preferred) or a unique timeframe. Clear with clear_setup_tool."""
+        return await apply_trade_setup(direction=direction, entry=entry, stop=stop,
+                                       targets=targets, label=label,
+                                       timeframe=timeframe, slot_id=slot_id)
+
+    @mcp.tool()
+    async def clear_setup_tool(slot_id: Optional[int] = None,
+                               timeframe: Optional[str] = None,
+                               setup_id: Optional[str] = None) -> dict:
+        """Remove trade setups from a chart (all of them, or one by setup_id)."""
+        return await clear_setup(timeframe=timeframe, slot_id=slot_id, setup_id=setup_id)
+
+    @mcp.tool()
+    async def clear_drawings_tool(slot_id: Optional[int] = None,
+                                  timeframe: Optional[str] = None) -> dict:
+        """Remove all drawings (incl. trade setups) from a chart."""
+        return await clear_drawings(timeframe=timeframe, slot_id=slot_id)
+
+    @mcp.tool()
+    async def snapshot_chart_tool(slot_id: Optional[int] = None,
+                                  timeframe: Optional[str] = None) -> dict:
+        """Save a PNG snapshot of a chart to the server's img/ folder.
+
+        Asks the browser to capture that chart (candles + overlays) and write it
+        to img/. Useful to archive a trade setup right after drawing it. Requires
+        a browser tab open on the chart page."""
+        return await request_snapshot(timeframe=timeframe, slot_id=slot_id)
 
     # ---- data / conditions ----
     @mcp.tool()
-    async def get_candles_tool(timeframe: str, count: int = 200) -> dict:
-        """Return recent OHLCV bars for `timeframe` (default 200)."""
-        return get_candles(timeframe, count)
+    async def get_candles_tool(slot_id: Optional[int] = None,
+                               timeframe: Optional[str] = None, count: int = 200) -> dict:
+        """Return recent OHLCV bars for a chart (default 200)."""
+        return get_candles(timeframe=timeframe, count=count, slot_id=slot_id)
 
     @mcp.tool()
-    async def get_indicator_values_tool(timeframe: str, indicator_id: str,
+    async def get_indicator_values_tool(indicator_id: str, slot_id: Optional[int] = None,
+                                        timeframe: Optional[str] = None,
                                         count: int = 200) -> dict:
-        """Return recent computed values for one indicator on `timeframe`."""
-        return get_indicator_values(timeframe, indicator_id, count)
+        """Return recent computed values for one indicator on a chart."""
+        return get_indicator_values(timeframe=timeframe, indicator_id=indicator_id,
+                                    count=count, slot_id=slot_id)
 
     @mcp.tool()
-    async def check_condition(timeframe: str, test: str, period: Optional[int] = None,
+    async def check_condition(test: str, slot_id: Optional[int] = None,
+                              timeframe: Optional[str] = None, period: Optional[int] = None,
                               fast: Optional[int] = None, slow: Optional[int] = None,
                               value: Optional[float] = None,
                               line_price: Optional[float] = None,
                               direction: Optional[str] = None) -> dict:
-        """Evaluate a condition on the last CLOSED bar of `timeframe`.
+        """Evaluate a condition on the last CLOSED bar of a chart.
 
         Supported `test` values and their params:
           close_above_ema / close_below_ema  -> period
@@ -1202,7 +1451,7 @@ def register_mcp_tools(mcp) -> None:
             params["line_price"] = line_price
         if direction is not None:
             params["direction"] = direction
-        return evaluate(timeframe, test, **params)
+        return evaluate(timeframe=timeframe, test=test, slot_id=slot_id, **params)
 
 
 def get_scene_state() -> dict:

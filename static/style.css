@@ -126,7 +126,36 @@ html, body {
 .panel-price .last { font-weight: 600; }
 .panel-price .chg.up { color: var(--up); }
 .panel-price .chg.down { color: var(--down); }
+/* slot id badge: how you address a chart ("slot 2") to the AI */
+.slot-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #0d1219;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  font-family: "SF Mono", Menlo, monospace;
+}
 .panel-head .ind-toggles { display: flex; gap: 3px; margin-left: auto; }
+.cam-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.cam-btn:hover { border-color: var(--accent); }
+/* active toggle look for top-bar buttons (Sync) */
+.ctl-btn.on { color: var(--accent); border-color: var(--accent); }
 .ind-btn {
   background: transparent;
   color: var(--muted);

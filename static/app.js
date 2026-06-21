@@ -74,6 +74,17 @@
     document.getElementById("refreshBtn").addEventListener("click", () =>
       sendManual("set_asset", { symbol: asset.display }));
 
+    const syncBtn = document.getElementById("syncBtn");
+    if (syncBtn) {
+      syncBtn.classList.toggle("on", syncOn);
+      syncBtn.addEventListener("click", () => {
+        syncOn = !syncOn;
+        saveSync();
+        syncBtn.classList.toggle("on", syncOn);
+        if (!syncOn) clearAllCrosshairs();
+      });
+    }
+
     const log = document.getElementById("eventLog");
     document.getElementById("logToggle").addEventListener("click", () =>
       log.classList.toggle("hidden"));
@@ -117,6 +128,14 @@
     const head = document.createElement("div");
     head.className = "panel-head";
 
+    // Slot badge: a chart is addressed by this id (stable by grid position), so
+    // you can tell the AI "slot 2" even when two charts show the same timeframe.
+    const badge = document.createElement("div");
+    badge.className = "slot-badge";
+    badge.textContent = slot.slot_id;
+    badge.title = `Chart slot ${slot.slot_id}`;
+    head.appendChild(badge);
+
     const tfPick = document.createElement("div");
     tfPick.className = "tf-picker";
     (CFG.timeframes || []).forEach((tf) => {
@@ -137,6 +156,13 @@
     const toggles = document.createElement("div");
     toggles.className = "ind-toggles";
     head.appendChild(toggles);
+
+    // Camera: save a PNG of this chart to the server's img/ folder.
+    const cam = document.createElement("button");
+    cam.className = "cam-btn";
+    cam.textContent = "📷";
+    cam.title = "Save a snapshot of this chart to img/";
+    head.appendChild(cam);
 
     root.appendChild(head);
 
@@ -170,14 +196,16 @@
       root, head, host, price, toggles, chart, candleSeries, vpCanvas,
       lineSeries: new Map(),     // indicator id -> line series
       volumeSeries: null,
-      drawObjs: new Map(),       // drawing id -> {type, ref}
+      drawObjs: new Map(),       // drawing id -> {type, refs:[...]}
       vpLines: [],               // poc/vah/val price lines
       vpData: null,              // last vp buckets+meta for redraw
       firstClose: null,
       lastClose: null,
       indicatorIds: new Set(),
     };
-    panels.set(slot.timeframe, panel);
+    panels.set(slot.slot_id, panel);
+
+    cam.addEventListener("click", () => capturePanel(panel));
 
     renderToggles(panel, slot.indicators || {});
     chart.timeScale().fitContent();
@@ -186,6 +214,9 @@
     chart.timeScale().subscribeVisibleTimeRangeChange(() => drawVP(panel));
     const ro = new ResizeObserver(() => { sizeVP(panel); drawVP(panel); });
     ro.observe(host);
+
+    // crosshair sync: broadcast this panel's hovered time/price to the others
+    chart.subscribeCrosshairMove((param) => onCrosshairMove(panel, param));
     return panel;
   }
 
@@ -210,10 +241,11 @@
   }
 
   function toggleIndicator(panel, kind) {
-    const tf = panel.timeframe;
+    const sid = panel.slotId;
     if (kind === "ema" || kind === "sma") {
-      // Toggle on/off (no dialog). Periods in use are remembered across toggles.
-      const key = `${tf}:${kind}`;
+      // Toggle on/off (no dialog). Periods in use are remembered across toggles,
+      // keyed by slot (stable by grid position) so the memory survives reloads.
+      const key = `${sid}:${kind}`;
       const current = [...panel.indicatorIds]
         .filter((id) => id.startsWith(kind + "-"))
         .map((id) => parseInt(id.split("-")[1], 10));
@@ -222,25 +254,25 @@
         indMemory.set(key, current);
         saveIndMemory();
         current.forEach((p) =>
-          sendManual("remove_indicator", { timeframe: tf, indicator_id: `${kind}-${p}` }));
+          sendManual("remove_indicator", { slot_id: sid, indicator_id: `${kind}-${p}` }));
       } else {
         // currently OFF -> restore remembered period(s), or the first-time default
         const remembered = indMemory.get(key);
         const periods = (Array.isArray(remembered) && remembered.length)
           ? remembered : [DEFAULT_PERIODS[kind]];
         periods.forEach((p) =>
-          sendManual("add_" + kind, { timeframe: tf, period: p }));
+          sendManual("add_" + kind, { slot_id: sid, period: p }));
       }
     } else if (kind === "vwap") {
       if (panel.indicatorIds.has("vwap"))
-        sendManual("remove_indicator", { timeframe: tf, indicator_id: "vwap" });
-      else sendManual("add_vwap", { timeframe: tf });
+        sendManual("remove_indicator", { slot_id: sid, indicator_id: "vwap" });
+      else sendManual("add_vwap", { slot_id: sid });
     } else if (kind === "vp") {
       if (panel.indicatorIds.has("vp"))
-        sendManual("remove_indicator", { timeframe: tf, indicator_id: "vp" });
-      else sendManual("add_volume_profile", { timeframe: tf });
+        sendManual("remove_indicator", { slot_id: sid, indicator_id: "vp" });
+      else sendManual("add_volume_profile", { slot_id: sid });
     } else if (kind === "volume") {
-      sendManual("toggle_volume_pane", { timeframe: tf, on: !panel.volumeSeries });
+      sendManual("toggle_volume_pane", { slot_id: sid, on: !panel.volumeSeries });
     }
   }
 
@@ -256,35 +288,41 @@
     logEvent(`scene: ${asset.display} layout ${layout}`);
   }
 
+  // Candles are shared across every chart on a timeframe (duplicates allowed),
+  // so fan a candle message out to all panels showing that timeframe.
+  function forEachPanelOnTf(tf, fn) {
+    panels.forEach((p) => { if (p.timeframe === tf) fn(p); });
+  }
+
   function setCandles(msg) {
-    const p = panels.get(msg.timeframe);
-    if (!p) return;
-    p.candleSeries.setData(msg.data.map((b) => ({
-      time: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
-    })));
-    if (msg.data.length) {
-      p.firstClose = msg.data[0].close;
-      updatePrice(p, msg.data[msg.data.length - 1].close);
-    }
-    p.chart.timeScale().fitContent();
+    forEachPanelOnTf(msg.timeframe, (p) => {
+      p.candleSeries.setData(msg.data.map((b) => ({
+        time: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
+      })));
+      if (msg.data.length) {
+        p.firstClose = msg.data[0].close;
+        updatePrice(p, msg.data[msg.data.length - 1].close);
+      }
+      p.chart.timeScale().fitContent();
+    });
   }
 
   function updateCandle(msg) {
-    const p = panels.get(msg.timeframe);
-    if (!p) return;
     const b = msg.bar;
-    p.candleSeries.update({
-      time: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
-    });
-    if (p.volumeSeries) {
-      p.volumeSeries.update({
-        time: b.time, value: b.volume,
-        color: b.close >= b.open ? UP : DOWN,
+    forEachPanelOnTf(msg.timeframe, (p) => {
+      p.candleSeries.update({
+        time: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
       });
-    }
-    // Keep the VP bars aligned as the price axis auto-scales / its width shifts.
-    if (p.vpData) drawVP(p);
-    updatePrice(p, b.close);
+      if (p.volumeSeries) {
+        p.volumeSeries.update({
+          time: b.time, value: b.volume,
+          color: b.close >= b.open ? UP : DOWN,
+        });
+      }
+      // Keep the VP bars aligned as the price axis auto-scales / its width shifts.
+      if (p.vpData) drawVP(p);
+      updatePrice(p, b.close);
+    });
   }
 
   function updatePrice(p, close) {
@@ -300,7 +338,7 @@
   }
 
   function drawIndicator(msg) {
-    const p = panels.get(msg.timeframe);
+    const p = panels.get(msg.slot_id);
     if (!p) return;
     p.indicatorIds.add(msg.id);
     if (msg.kind === "ema" || msg.kind === "sma" || msg.kind === "vwap") {
@@ -334,11 +372,11 @@
       drawVP(p);
     }
     syncToggleState(p);
-    logEvent(`+${msg.kind} ${msg.id} @ ${msg.timeframe}`);
+    logEvent(`+${msg.kind} ${msg.id} @ slot ${msg.slot_id} (${msg.timeframe})`);
   }
 
   function removeIndicator(msg) {
-    const p = panels.get(msg.timeframe);
+    const p = panels.get(msg.slot_id);
     if (!p) return;
     p.indicatorIds.delete(msg.id);
     const s = p.lineSeries.get(msg.id);
@@ -348,7 +386,7 @@
     }
     if (msg.id === "vp") { clearVP(p); p.vpData = null; }
     syncToggleState(p);
-    logEvent(`-${msg.id} @ ${msg.timeframe}`);
+    logEvent(`-${msg.id} @ slot ${msg.slot_id} (${msg.timeframe})`);
   }
 
   function syncToggleState(p) {
@@ -361,20 +399,34 @@
     });
   }
 
-  // ---- drawings ----
+  // ---- drawings (addressed by slot_id) ----
+  // Each drawObjs entry collects whatever chart objects make up one drawing,
+  // so hlines, trendlines and multi-line trade setups all remove uniformly.
+  function makeDrawEntry() { return { priceLines: [], series: [] }; }
+
+  function addPriceLine(p, entry, opts) {
+    entry.priceLines.push(p.candleSeries.createPriceLine(opts));
+  }
+
+  function removeDrawObj(p, e) {
+    e.priceLines.forEach((l) => { try { p.candleSeries.removePriceLine(l); } catch (x) {} });
+    e.series.forEach((s) => { try { p.chart.removeSeries(s); } catch (x) {} });
+  }
+
   function drawHline(msg) {
-    const p = panels.get(msg.timeframe);
+    const p = panels.get(msg.slot_id);
     if (!p) return;
-    const line = p.candleSeries.createPriceLine({
+    const e = makeDrawEntry();
+    addPriceLine(p, e, {
       price: msg.price, color: msg.color || "#facc15", lineWidth: 1,
       lineStyle: 2, axisLabelVisible: true, title: msg.label || "",
     });
-    p.drawObjs.set(msg.id, { type: "hline", ref: line });
-    logEvent(`hline ${fmt(msg.price)} @ ${msg.timeframe}`);
+    p.drawObjs.set(msg.id, e);
+    logEvent(`hline ${fmt(msg.price)} @ slot ${msg.slot_id}`);
   }
 
   function drawTrendline(msg) {
-    const p = panels.get(msg.timeframe);
+    const p = panels.get(msg.slot_id);
     if (!p) return;
     const s = p.chart.addLineSeries({
       color: msg.color || "#22d3ee", lineWidth: 2,
@@ -386,19 +438,58 @@
       { time: msg.t2, value: msg.price2 },
     ].sort((a, b) => a.time - b.time);
     s.setData(pts);
-    p.drawObjs.set(msg.id, { type: "trend", ref: s });
-    logEvent(`trendline @ ${msg.timeframe}`);
+    const e = makeDrawEntry();
+    e.series.push(s);
+    p.drawObjs.set(msg.id, e);
+    logEvent(`trendline @ slot ${msg.slot_id}`);
+  }
+
+  function drawSetup(msg) {
+    const p = panels.get(msg.slot_id);
+    if (!p) return;
+    const cols = msg.colors || {};
+    const tag = msg.label ? msg.label + " " : "";
+    const e = makeDrawEntry();
+    addPriceLine(p, e, {
+      price: msg.entry, color: cols.entry || "#e0e0e0", lineWidth: 2,
+      lineStyle: 0, axisLabelVisible: true, title: `${tag}${msg.direction} entry`,
+    });
+    addPriceLine(p, e, {
+      price: msg.stop, color: cols.stop || "#ef5350", lineWidth: 1,
+      lineStyle: 2, axisLabelVisible: true, title: "stop",
+    });
+    (msg.targets || []).forEach((t, i) => {
+      addPriceLine(p, e, {
+        price: t.price, color: cols.target || "#26a69a", lineWidth: 1,
+        lineStyle: 2, axisLabelVisible: true, title: `TP${i + 1} (${t.rr}R)`,
+      });
+    });
+    p.drawObjs.set(msg.id, e);
+    logEvent(`setup ${msg.direction} (${(msg.targets || []).length} TP) @ slot ${msg.slot_id}`);
+  }
+
+  function dispatchDrawing(msg) {
+    if (msg.kind === "hline") drawHline(msg);
+    else if (msg.kind === "setup") drawSetup(msg);
+    else drawTrendline(msg);
+  }
+
+  function removeDrawing(msg) {
+    const p = panels.get(msg.slot_id);
+    if (!p) return;
+    const e = p.drawObjs.get(msg.id);
+    if (!e) return;
+    removeDrawObj(p, e);
+    p.drawObjs.delete(msg.id);
+    logEvent(`-drawing ${msg.id} @ slot ${msg.slot_id}`);
   }
 
   function clearDrawings(msg) {
-    const p = panels.get(msg.timeframe);
+    const p = panels.get(msg.slot_id);
     if (!p) return;
-    p.drawObjs.forEach((d) => {
-      if (d.type === "hline") p.candleSeries.removePriceLine(d.ref);
-      else if (d.type === "trend") p.chart.removeSeries(d.ref);
-    });
+    p.drawObjs.forEach((e) => removeDrawObj(p, e));
     p.drawObjs.clear();
-    logEvent(`clear drawings @ ${msg.timeframe}`);
+    logEvent(`clear drawings @ slot ${msg.slot_id}`);
   }
 
   // =========================================================
@@ -473,6 +564,89 @@
   }
 
   // =========================================================
+  // Snapshot (camera) -> POST /snapshot -> img/
+  // =========================================================
+  function stampNow() {
+    const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} `
+         + `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  }
+
+  function capturePanel(p) {
+    try {
+      const base = p.chart.takeScreenshot();      // LWC v4 returns a <canvas>
+      const out = document.createElement("canvas");
+      out.width = base.width;
+      out.height = base.height;
+      const ctx = out.getContext("2d");
+      ctx.drawImage(base, 0, 0);
+      // overlay the VP bars (a separate canvas) so the snapshot matches the screen
+      if (p.vpCanvas && p.vpData) {
+        try { ctx.drawImage(p.vpCanvas, 0, 0, out.width, out.height); } catch (e) {}
+      }
+      // burn a small corner label so the saved file is self-identifying
+      const label = `${asset.display}  ${p.timeframe}  ${stampNow()}`;
+      ctx.font = "12px monospace";
+      const tw = ctx.measureText(label).width + 10;
+      ctx.fillStyle = "rgba(10,14,20,0.72)";
+      ctx.fillRect(4, 4, tw, 18);
+      ctx.fillStyle = "#d4dae3";
+      ctx.fillText(label, 9, 17);
+      const image = out.toDataURL("image/png");
+      fetch("/snapshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ asset_display: asset.display, timeframe: p.timeframe,
+                               slot_id: p.slotId, image }),
+      }).then((r) => r.json())
+        .then((j) => logEvent(j.ok ? `📷 saved ${j.path}` : `📷 error: ${j.error}`))
+        .catch((e) => logEvent(`📷 error: ${e.message}`));
+    } catch (e) {
+      logEvent(`📷 capture failed: ${e.message}`);
+    }
+  }
+
+  // =========================================================
+  // Crosshair sync across charts (global toggle, persisted)
+  // =========================================================
+  const SYNC_KEY = "tvcharts.crosshairSync";
+  let syncOn = loadSync();
+  let syncing = false;                            // re-entrancy guard
+
+  function loadSync() {
+    try { return localStorage.getItem(SYNC_KEY) === "1"; } catch (e) { return false; }
+  }
+  function saveSync() {
+    try { localStorage.setItem(SYNC_KEY, syncOn ? "1" : "0"); } catch (e) {}
+  }
+  function clearAllCrosshairs() {
+    panels.forEach((p) => { try { p.chart.clearCrosshairPosition(); } catch (e) {} });
+  }
+
+  function onCrosshairMove(srcPanel, param) {
+    if (!syncOn || syncing) return;
+    syncing = true;
+    try {
+      if (!param || !param.point || param.time == null) {
+        panels.forEach((p) => {
+          if (p !== srcPanel) { try { p.chart.clearCrosshairPosition(); } catch (e) {} }
+        });
+        return;
+      }
+      const price = srcPanel.candleSeries.coordinateToPrice(param.point.y);
+      if (price == null) return;
+      // Same time + price on every other chart (time is absolute UNIX seconds,
+      // so this works even across different timeframes).
+      panels.forEach((p) => {
+        if (p === srcPanel) return;
+        try { p.candleSeries.setCrosshairPosition(price, param.time); } catch (e) {}
+      });
+    } finally {
+      syncing = false;
+    }
+  }
+
+  // =========================================================
   // WebSocket plumbing
   // =========================================================
   const dispatch = {
@@ -481,8 +655,10 @@
     candle_update: updateCandle,
     indicator: drawIndicator,
     remove_indicator: removeIndicator,
-    drawing: (m) => (m.kind === "hline" ? drawHline(m) : drawTrendline(m)),
+    drawing: dispatchDrawing,
+    remove_drawing: removeDrawing,
     clear_drawings: clearDrawings,
+    snapshot_request: (m) => { const p = panels.get(m.slot_id); if (p) capturePanel(p); },
     ack: (m) => { if (!m.ok) logEvent("ack error: " + m.error); },
   };
 

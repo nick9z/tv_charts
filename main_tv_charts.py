@@ -20,8 +20,8 @@ import asyncio
 import os
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -49,15 +49,17 @@ async def lifespan(app: FastAPI):
     session manager (required for the streamable-HTTP transport)."""
     await F.startup()
     ws_task = asyncio.create_task(F.bybit_ws_loop())
+    refresh_task = asyncio.create_task(F.refresh_loop())
     async with mcp.session_manager.run():
         try:
             yield
         finally:
-            ws_task.cancel()
-            try:
-                await ws_task
-            except asyncio.CancelledError:
-                pass
+            for t in (ws_task, refresh_task):
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
             await F.shutdown()
 
 
@@ -83,6 +85,21 @@ async def config_js():
         "};\n"
     )
     return HTMLResponse(content=body, media_type="application/javascript")
+
+
+@app.post("/snapshot")
+async def snapshot(request: Request):
+    """Receive a base64 PNG from the browser and save it to img/.
+
+    Body: {asset_display, timeframe, slot_id, image}. Returns {ok, path}.
+    """
+    try:
+        body = await request.json()
+        path = F.save_snapshot(body.get("asset_display", "chart"), body["image"])
+        return JSONResponse({"ok": True, "path": path})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                            status_code=400)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
