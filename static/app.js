@@ -71,8 +71,10 @@
     lSel.addEventListener("change", () =>
       sendManual("set_layout", { n: Number(lSel.value) }));
 
+    // Refresh = refetch data only. Preserves indicators, drawings and zoom
+    // (a non-destructive reload, not an asset switch / scene rebuild).
     document.getElementById("refreshBtn").addEventListener("click", () =>
-      sendManual("set_asset", { symbol: asset.display }));
+      sendManual("refresh", {}));
 
     const syncBtn = document.getElementById("syncBtn");
     if (syncBtn) {
@@ -303,7 +305,8 @@
         p.firstClose = msg.data[0].close;
         updatePrice(p, msg.data[msg.data.length - 1].close);
       }
-      p.chart.timeScale().fitContent();
+      // Fit only on first load; later refreshes keep the user's zoom/pan.
+      if (!p.fitted) { p.chart.timeScale().fitContent(); p.fitted = true; }
     });
   }
 
@@ -337,21 +340,31 @@
     }
   }
 
+  // EMA/SMA price-axis label derived from the indicator id ("ema-50" -> "EMA 50"),
+  // so the period (the input value used) is always shown on the chart.
+  function maLabel(msg) {
+    const m = /^(ema|sma)-(\d+)$/.exec(msg.id || "");
+    return m ? `${m[1].toUpperCase()} ${m[2]}` : "";
+  }
+
   function drawIndicator(msg) {
     const p = panels.get(msg.slot_id);
     if (!p) return;
     p.indicatorIds.add(msg.id);
     if (msg.kind === "ema" || msg.kind === "sma" || msg.kind === "vwap") {
+      const label = maLabel(msg);
       let s = p.lineSeries.get(msg.id);
       if (!s) {
         s = p.chart.addLineSeries({
           color: msg.color, lineWidth: 2,
-          priceLineVisible: false, lastValueVisible: false,
+          priceLineVisible: false,
+          lastValueVisible: !!label,
+          title: label,
           crosshairMarkerVisible: false,
         });
         p.lineSeries.set(msg.id, s);
       }
-      s.applyOptions({ color: msg.color });
+      s.applyOptions({ color: msg.color, title: label, lastValueVisible: !!label });
       s.setData(msg.series);
     } else if (msg.kind === "volume") {
       if (!p.volumeSeries) {
@@ -469,6 +482,14 @@
   }
 
   function dispatchDrawing(msg) {
+    // Drawings are re-broadcast on every auto-refresh with their stable id.
+    // Drop any existing chart objects for that id first, otherwise each redraw
+    // would orphan the old price lines and stack duplicate labels over time.
+    const p = panels.get(msg.slot_id);
+    if (p) {
+      const old = p.drawObjs.get(msg.id);
+      if (old) { removeDrawObj(p, old); p.drawObjs.delete(msg.id); }
+    }
     if (msg.kind === "hline") drawHline(msg);
     else if (msg.kind === "setup") drawSetup(msg);
     else drawTrendline(msg);
@@ -639,7 +660,9 @@
       // so this works even across different timeframes).
       panels.forEach((p) => {
         if (p === srcPanel) return;
-        try { p.candleSeries.setCrosshairPosition(price, param.time); } catch (e) {}
+        // setCrosshairPosition is a CHART method (price, time, series) in
+        // Lightweight Charts v4 — not a series method.
+        try { p.chart.setCrosshairPosition(price, param.time, p.candleSeries); } catch (e) {}
       });
     } finally {
       syncing = false;

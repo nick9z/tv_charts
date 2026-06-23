@@ -1060,7 +1060,12 @@ async def handle_manual(action: str, params: dict) -> None:
     sid = params.get("slot_id")
     sid = int(sid) if sid is not None else None
     tf = params.get("timeframe")
-    if action == "set_asset":
+    if action == "refresh":
+        # Non-destructive reload: refetch history and re-push candles +
+        # indicators + drawings. Keeps the scene (no panel rebuild) and never
+        # wipes drawings, so on-page state survives a Refresh click.
+        await refresh_all_active()
+    elif action == "set_asset":
         await set_asset(params["symbol"])
     elif action == "set_layout":
         await set_layout(int(params["n"]))
